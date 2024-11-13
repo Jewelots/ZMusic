@@ -50,6 +50,9 @@
 #include "zmusic/midiconfig.h"
 #include "fileio.h"
 
+#include "unmo3.h"
+#include "internal/dumbfile.h"
+
 // MACROS ------------------------------------------------------------------
 
 // TYPES -------------------------------------------------------------------
@@ -64,7 +67,7 @@ public:
 	//bool SetPosition(int ms);
 	bool SetSubsong(int subsong) override;
 	bool Start() override;
-	SoundStreamInfoEx GetFormatEx() override;
+	SoundStreamInfo GetFormat() override;
 	void ChangeSettingNum(const char* setting, double val) override;
 	std::string GetStats() override;
 
@@ -774,6 +777,8 @@ StreamSource* MOD_OpenSong(MusicIO::FileInterface *reader, int samplerate)
 	bool is_it = false;
 	bool is_dos = true;
 
+	bool delete_unmo = false;
+
 	auto fpos = reader->tell();
     int size = (int)reader->filelength();
 
@@ -885,17 +890,47 @@ StreamSource* MOD_OpenSong(MusicIO::FileInterface *reader, int samplerate)
 			duh = dumb_read_okt_quick(f);
 		}
 	}
-	else if (size >= 4 &&
-		 (dstart[0] == MAKE_ID('A','M','F','\xa') ||
-		 dstart[0] == MAKE_ID('A','M','F','\xb') ||
-		 dstart[0] == MAKE_ID('A','M','F','\xc') ||
-		 dstart[0] == MAKE_ID('A','M','F','\xd') ||
-		 dstart[0] == MAKE_ID('A','M','F','\xe')))
-	{
-		if ((f = dumb_read_allfile(&filestate, start, reader, headsize, size)))
+	else if (size >= 4 && dstart[0] == MAKE_ID('M', 'O', '3', '\x05'))
+	{	
+		uint8_t* mem = new uint8_t[size];
+		memcpy(mem, start, headsize);
+
+		// read the rest of the file first, then decode it, then read that again with dumb instead
+		if (reader->read(mem + headsize, size - headsize) == (size - headsize))
 		{
-			duh = dumb_read_amf_quick(f);
+			void* decodedData = mem;
+			unsigned int decodedSize = size;
+
+			int r = UNMO3_Decode(&decodedData, &decodedSize, 0);
+			delete_unmo = true;
+
+			if (r == 0)
+			{
+				filestate.ptr = static_cast<uint8_t*>(decodedData);
+				filestate.offset = 0;
+
+				is_it = true;
+
+				if ((f = dumb_read_allfile(&filestate, static_cast<uint8_t*>(decodedData), nullptr, decodedSize, decodedSize)))
+				{
+					duh = dumb_read_it_quick(f); // Now handle the module data as if it were a standard module format.
+				}
+			}
+			else if (r == 1)
+			{
+				SetError("File isn't an MO3 file");
+			}
+			else if (r == 2)
+			{
+				SetError("Problem decoding MO3 file");
+			}
 		}
+		else
+		{
+			SetError("Failed to read MO3 data");
+		}
+
+		delete[] mem;
 	}
 
 	if ( ! duh )
@@ -941,9 +976,13 @@ StreamSource* MOD_OpenSong(MusicIO::FileInterface *reader, int samplerate)
 		// Reposition file pointer for other codecs to do their checks.
         reader->seek(fpos, SEEK_SET);
 	}
-	if (filestate.ptr != (uint8_t *)start)
+	if (!delete_unmo && filestate.ptr != (uint8_t *)start)
 	{
 		delete[] const_cast<uint8_t *>(filestate.ptr);
+	}
+	else if (delete_unmo)
+	{
+		UNMO3_Free((void*)filestate.ptr);
 	}
 	return state;
 }
@@ -1016,7 +1055,7 @@ DumbSong::DumbSong(DUH* myduh, int samplerate)
 	written = 0;
 	length = 0;
 	start_order = 0;
-	MasterVolume = (float)dumbConfig.mod_dumb_mastervolume * 4;
+	MasterVolume = (float)dumbConfig.mod_dumb_mastervolume;
 	if (dumbConfig.mod_samplerate != 0)
 	{
 		srate = dumbConfig.mod_samplerate;
@@ -1042,13 +1081,13 @@ DumbSong::~DumbSong()
 
 //==========================================================================
 //
-// DumbSong GetFormatEx
+// DumbSong GetFormat
 //
 //==========================================================================
 
-SoundStreamInfoEx DumbSong::GetFormatEx()
+SoundStreamInfo DumbSong::GetFormat()
 {
-	return { 32*1024, srate, SampleType_Float32, ChannelConfig_Stereo };
+	return { 32*1024, srate, 2 };
 }
 
 //==========================================================================

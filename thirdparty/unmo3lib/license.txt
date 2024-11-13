@@ -1,0 +1,3 @@
+Copyright Laurent Clévy (lclevy@free.fr)
+
+This code is under GPLv2 license, with exception to mo3_unpack.c/.h under BSD now.
